@@ -54,6 +54,10 @@ import { normalizeRoundId, type RoundIdInput } from "./store.js";
 
 const diagnostics = createLogger("services.keeper.src.checkpoint");
 
+// Owner-only permissions (0600) for checkpoint files, matching the store.
+const CHECKPOINT_FILE_PERMISSIONS = 0o600;
+export let writeSequence = 0;
+
 /** Schema version of the on-disk checkpoint file. */
 export const CHECKPOINT_VERSION = 1;
 
@@ -402,6 +406,17 @@ export class KeeperCheckpointStore implements ResumableCheckpoint {
       return emptyFile(this.network, this.contractId);
     }
 
+    // Tighten an existing checkpoint written by an older build to owner-only.
+    try {
+      fs.chmodSync(this.filePath, CHECKPOINT_FILE_PERMISSIONS);
+    } catch (chmodErr) {
+      this.logger.warn(
+        "checkpoint-could-not-set-file-permissions",
+        `[Checkpoint] Could not set permissions on ${this.filePath}:`,
+        { "chmodErr_0": normalizeError(chmodErr) },
+      );
+    }
+
     let parsed: KeeperCheckpointFile;
     try {
       const content = fs.readFileSync(this.filePath, "utf-8");
@@ -469,7 +484,15 @@ export class KeeperCheckpointStore implements ResumableCheckpoint {
     try {
       const dir = path.dirname(this.filePath);
       if (dir !== ".") fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), "utf-8");
+      // Write-then-rename so another keeper process can never read a truncated
+      // checkpoint. The temporary file is created owner-only (0600) so its
+      // contents are never briefly readable by other users before a chmod.
+      const tmpPath = `${this.filePath}.tmp.${process.pid}.${++writeSequence}`;
+      fs.writeFileSync(tmpPath, JSON.stringify(this.data, null, 2), {
+        encoding: "utf-8",
+        mode: CHECKPOINT_FILE_PERMISSIONS,
+      });
+      fs.renameSync(tmpPath, this.filePath);
     } catch (e) {
       this.logger.error(
         "checkpoint-failed-to-save",

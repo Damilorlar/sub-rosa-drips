@@ -7,6 +7,10 @@ import * as path from "path";
 import { randomUUID } from "node:crypto";
 import { systemClock, type Clock } from "@sub-rosa/time";
 
+// 0600 = owner read/write only (Unix). On Windows, Node maps the write bit to
+// file attributes; full ACL management is platform-specific.
+const FILE_PERMISSIONS = 0o600;
+
 export interface WatchedRound {
   roundId: string;
   contractId?: string;
@@ -189,6 +193,17 @@ export class KeeperStore {
       return { rounds: {}, leases: {} };
     }
 
+    // Tighten a store written by an older build to owner-only before reading it.
+    try {
+      fs.chmodSync(this.storePath, FILE_PERMISSIONS);
+    } catch (chmodErr) {
+      this.logger.warn(
+        "store-could-not-set-file-permissions",
+        `[Store] Could not set permissions on ${this.storePath}:`,
+        { "chmodErr_0": normalizeError(chmodErr) },
+      );
+    }
+
     try {
       const content = fs.readFileSync(this.storePath, "utf-8");
       if (!content.trim()) return { rounds: {}, leases: {} };
@@ -241,9 +256,14 @@ export class KeeperStore {
         fs.mkdirSync(dir, { recursive: true });
       }
       // Write-then-rename so a second keeper process never reads a half-written
-      // store while it is deciding whether it may claim a round.
+      // store while it is deciding whether it may claim a round. The temporary
+      // file is created owner-only (0600) so the new contents are never briefly
+      // readable by other users on the host before a chmod would land.
       const tmpPath = `${this.storePath}.tmp.${process.pid}.${++writeSequence}`;
-      fs.writeFileSync(tmpPath, JSON.stringify(this.data, null, 2), "utf-8");
+      fs.writeFileSync(tmpPath, JSON.stringify(this.data, null, 2), {
+        encoding: "utf-8",
+        mode: FILE_PERMISSIONS,
+      });
       fs.renameSync(tmpPath, this.storePath);
     } catch (e) {
       this.logger.error("store-failed-to-save-store-to", `[Store] Failed to save store to ${this.storePath}:`, { "e_0": normalizeError(e) });
